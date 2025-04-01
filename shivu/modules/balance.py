@@ -1,220 +1,465 @@
-import math
-import asyncio
-from datetime import datetime, timedelta
 from telegram.ext import CommandHandler
-from shivu import application, user_collection
-import math
-import random
+from shivu import application, registered_users,SUPPORT_CHAT
+from telegram import Update
+from datetime import datetime, timedelta
+import asyncio
 import time
+import random
+import html
+from datetime import datetime, timedelta
+from shivu import shivuu as bot
+from shivu import shivuu as app
+from pyrogram.types import Message
+from pyrogram import filters, types as t
+from html import escape
+from shivu import application, user_collection
+from telegram.ext import CommandHandler, CallbackContext, CallbackQueryHandler, ContextTypes
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
+from shivu import sudo_users_collection, user_collection
+from shivu.modules.database.sudo import is_user_sudo
 
-async def balance(update, context):
-    user_id = update.effective_user.id
+cooldowns = {}
+user_last_command_times = {}
+ban_user_ids = {5553813115}
+logs_group_id = -1001992198513
+logs = {logs_group_id}
+async def send_start_button(chat_id):
+    await app.send_message(chat_id, "🚀 You need to register first by starting the bot in DM. Type `/start` to begin your journey!")
 
+
+@app.on_message(filters.command(["sinv", "balance", "bal", "wealth"]))
+async def check_balance(_, message: Message):
+    user_id = message.from_user.id
+    replied_user_id = None
+    
+    if message.reply_to_message:
+        replied_user_id = message.reply_to_message.from_user.id
+    
+    # Check if the command was used as a reply
+    if replied_user_id:
+        user_id = replied_user_id
+    
+    # Check if the user is registered
     user_data = await user_collection.find_one({'id': user_id})
-
-    if user_data:
-        balance_amount = user_data.get('balance', 0)
-        bank_balance = math.floor(bank_balance)
-        balance_message = f"Your Current Balance Is :  $ `{balance_amount}` Gold coins!!"    
-    else:
-        balance_message = "You are not eligible To be a Hunter 🍂"
-
-    await update.message.reply_text(balance_message)
-
-pay_cooldown = {}
-
-async def pay(update, context):
+    if not user_data:
+        await send_start_button(message.chat.id)
+        return
+    balance = user_data.get('balance', 0)
+    formatted_balance = "{:,.0f}".format(balance)
+    first_name = user_data.get('first_name', 'User')
+    # Reply to the user with their balance
+    await message.reply_text(f"{first_name}'s Wealth: ₩`{formatted_balance}`[.](https://files.catbox.moe/fruhx3.mp4)")
+    
+# Command: Pay
+async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.effective_user.id
 
+    # Custom help keyboard
+    support_keyboard = [
+        [InlineKeyboardButton("📩 Appeal Support", url="https://t.me/dynamic_gangs")]
+    ]
+    support_markup = InlineKeyboardMarkup(support_keyboard)
+
+    # Cooldown check (20 minutes)
+    if sender_id in cooldowns and (time.time() - cooldowns[sender_id]) < 1200:
+        remaining_time = int(1200 - (time.time() - cooldowns[sender_id]))
+        await update.message.reply_text(
+            f"⏳ You can use /pay again in {remaining_time // 60} minutes and {remaining_time % 60} seconds.",
+            reply_markup=support_markup,
+        )
+        return
+
     if not update.message.reply_to_message:
-        await update.message.reply_text("Please reply To a Hunter to /pay.")
-        return
-    
-    if update.message.reply_to_message.from_user and update.message.reply_to_message.from_user.id == sender_id:
-        await update.message.reply_text("You can't give $ Gold coins To Yourself!")
+        await update.message.reply_text("❌ Please reply to the user you want to pay.")
         return
 
-    # Check if the user has executed /pay recently and enforce cooldown
-    if sender_id in pay_cooldown:
-        last_execution_time = pay_cooldown[sender_id]
-        if (datetime.utcnow() - last_execution_time) < timedelta(minutes=30):
-            await update.message.reply_text("You can pay /pay again after 30 Minutes!!...")
-            return
-
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Please reply a Hunter to /pay.")
-        return
-
+    # Extract recipient ID and payment amount
     recipient_id = update.message.reply_to_message.from_user.id
-    recipient_first_name = update.message.reply_to_message.from_user.first_name
-    recipient_username = update.message.reply_to_message.from_user.username
-
     try:
         amount = int(context.args[0])
+        if amount <= 0:
+            raise ValueError("Amount must be positive.")
     except (IndexError, ValueError):
-        await update.message.reply_text("Invaild amount, use /pay <amount>")
-        return
-      
-    if amount < 0:
-        await update.message.reply_text("Amount must be positive BKL !!!")
-        return
-    elif amount > 1000000:
-        await update.message.reply_text("You can pay upto $ `10,00,000` Gold coins in one payment !!")
+        await update.message.reply_text("🚫 Invalid amount. Use: /pay <amount>")
         return
 
-    sender_data = await user_collection.find_one({'id': sender_id})
+    # Payment limit validation
+    if amount > 1_000_000_000:
+        await update.message.reply_text("💸 You can't pay more than ₩1,000,000,000.")
+        return
+
+    # Sender balance check
+    sender_data = await user_collection.find_one({'id': sender_id}, projection={'balance': 1})
     if not sender_data or sender_data.get('balance', 0) < amount:
-        await update.message.reply_text("insufficient amount to pay !!.")
+        await update.message.reply_text("❌ Insufficient balance for the transaction.")
         return
 
-    await user_collection.update_one(
-        {'id': sender_id},
-        {'$inc': {'balance': -amount}}
+    # Check for disallowed words in the command
+    disallowed_words = ['negative', 'badword']  # Add any disallowed words here
+    if any(word in update.message.text.lower() for word in disallowed_words):
+        await update.message.reply_text("🚫 Disallowed words detected in the payment message.")
+        return
+
+    # Process the payment
+    await user_collection.update_one({'id': sender_id}, {'$inc': {'balance': -amount}})
+    await user_collection.update_one({'id': recipient_id}, {'$inc': {'balance': amount}})
+    cooldowns[sender_id] = time.time()  # Set cooldown for the sender
+
+    # Fetch recipient details
+    recipient = await context.bot.get_chat(recipient_id)
+    recipient_name = recipient.first_name + (f" {recipient.last_name}" if recipient.last_name else "")
+    recipient_username = f"@{recipient.username}" if recipient.username else "an anonymous user"
+
+    # Success message
+    new_balance = sender_data['balance'] - amount
+    success_message = (
+        f"✅ <b>Transaction Successful!</b>\n"
+        f"💳 You sent <b>₩{amount:,}</b> to <b>{recipient_name}</b> ({recipient_username}).\n"
+        f"🔢 <b>Your New Balance:</b> <code>₩{new_balance:,}</code>\n"
+        "📈 Keep growing your wealth!"
     )
-    await user_collection.update_one(
-        {'id': recipient_id},
-        {'$inc': {'balance': amount}}
+    await update.message.reply_text(success_message, parse_mode=ParseMode.HTML)
+
+    # Recipient notification
+    recipient_message = (
+        f"🎉 <b>You've received a payment!</b>\n"
+        f"💸 Amount: <b>₩{amount:,}</b>\n"
+        f"👤 From: <b>{update.effective_user.first_name}</b> "
+        f"({f'@{update.effective_user.username}' if update.effective_user.username else 'an anonymous user'})\n"
+        f"💰 Check your balance now!"
+    )
+    try:
+        await context.bot.send_message(recipient_id, recipient_message, parse_mode=ParseMode.HTML)
+    except Exception:
+        # If the recipient can't be notified
+        await update.message.reply_text("⚠️ Payment was successful, but the recipient could not be notified.")
+
+    # Additional Feature: Optional Leaderboard Updates (if implemented)
+    # Example: await update_leaderboard(sender_id, recipient_id, amount)
+
+# Summary of Features Added
+# 1. **Improved Error Handling**:
+#    - Custom responses for invalid input, cooldowns, or disallowed words.
+# 2. **Recipient Notification**:
+#    - Notifies the recipient of a successful payment.
+# 3. **Detailed Success Message**:
+#    - Includes formatted amount and new balance.
+# 4. **Support Appeal Link**:
+#    - Inline keyboard for user support.
+# 5. **Balance Safeguards**:
+#    - Ensures users can't pay more than their balance or bypass limits.
+            
+async def mtop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Fetch top 10 users sorted by balance in descending order
+    top_users = await user_collection.find(
+        {}, 
+        projection={'id': 1, 'first_name': 1, 'last_name': 1, 'balance': 1}
+    ).sort('balance', -1).limit(10).to_list(10)
+
+    # Header for the leaderboard
+    top_users_message = (
+        "🏅 <b>Top 10 Richest Users</b> 🏅\n"
+        "💰 <i>Who’s ruling the leaderboard?</i>\n\n"
     )
 
-    pay_cooldown[sender_id] = datetime.utcnow()
+    # List users with rank, name, and balance
+    if not top_users:
+        top_users_message += "❌ <i>No users found in the database.</i>"
+    else:
+        for i, user in enumerate(top_users, start=1):
+            user_id = user.get('id', 'Unknown')
+            first_name = html.escape(user.get('first_name', 'Unknown'))
+            last_name = html.escape(user.get('last_name', '')) if user.get('last_name') else ''
+            full_name = f"{first_name} {last_name}".strip()
+            user_link = f"<a href='tg://user?id={user_id}'>{first_name}</a>"
+            balance = user.get('balance', 0)
+            top_users_message += f"❖ <b>{i}. {user_link}</b> — ₩{balance:,.0f}\n"
 
-    recipient_link = f"https://t.me/{recipient_username}" if recipient_username else f"https://t.me/user{recipient_id}"
-    success_message = f"success ! You paid $ `{amount}` Gold coins to [{recipient_first_name}]!"
+    # Footer
+    top_users_message += "\n━━━━━━━━━━━━━━━━━\n<i>Stay active to secure your spot!</i>"
 
-    await update.message.reply_markdown(success_message)
+    # Send the leaderboard as a plain message
+    await update.message.reply_text(
+        text=top_users_message,
+        parse_mode='HTML'
+    )
+    
+@bot.on_message(filters.command("daily"))
+async def daily_reward(_, message):
+    user_id = message.from_user.id
 
-async def mtop(update, context):
-    # Retrieve the top 10 users with the highest balance
-    top_users = await user_collection.find({}, projection={'id': 1, 'first_name': 1, 'last_name': 1, 'balance': 1}).sort('balance', -1).limit(10).to_list(10)
+    # Fetch user data
+    user_data = await user_collection.find_one(
+        {'id': user_id}, 
+        projection={'last_daily_reward': 1, 'balance': 1, 'streak': 1}
+    )
 
-    # Create a message with the top users
-    top_users_message = "Top 10 Rich Hunters data.\n\n"
-    for i, user in enumerate(top_users, start=1):
-        first_name = user.get('first_name', 'Unknown')
-        last_name = user.get('last_name', '')
-        user_id = user.get('id', 'Unknown')
+    if not user_data:
+        await message.reply_text("❌ **You are not registered yet. Use /start to begin your journey!**")
+        return
 
-        full_name = f"{first_name} {last_name}" if last_name else first_name
+    last_claimed_date = user_data.get('last_daily_reward')
+    streak = user_data.get('streak', 0)
 
-        top_users_message += f"{i}. <a href='tg://user?id={user_id}'>{full_name}</a>, $ `{user.get('balance', 0)}` Gold Coins\n"
+    # Check if the reward was already claimed today
+    if last_claimed_date and last_claimed_date.date() == datetime.utcnow().date():
+        await message.reply_text(
+            "🚫 **You've already claimed your daily reward today!**\n"
+            "⏳ **Come back tomorrow to continue your streak!**"
+        )
+        return
 
-    photo_path = 'https://telegra.ph/file/07283c3102ae87f3f2833.png'
-    await update.message.reply_photo(photo=photo_path, caption=top_users_message, parse_mode='HTML')
+    # Check if the streak was broken
+    if last_claimed_date and last_claimed_date.date() < (datetime.utcnow().date() - timedelta(days=1)):
+        streak = 0  # Reset streak if not claimed yesterday
 
+    # Increment streak and calculate reward
+    streak += 1
+    base_reward = 50000
+    streak_bonus = streak * 1000  # Bonus increases with streak
+    total_reward = base_reward + streak_bonus
 
-from datetime import datetime, timedelta
-
-async def format_time_delta(delta):
-    seconds = delta.total_seconds()
-    hours, remainder = divmod(seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    return f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
-
-async def daily_reward(update, context):
-    user_id = update.effective_user.id
-    user_data = await user_collection.find_one({'id': user_id}, projection={'last_daily_reward': 1, 'balance': 1})
-
-    if user_data:
-        last_claimed_date = user_data.get('last_daily_reward')
-
-        if last_claimed_date and last_claimed_date.date() == datetime.utcnow().date():
-            remaining_time = timedelta(days=1) - (datetime.utcnow() - last_claimed_date)
-            formatted_time = await format_time_delta(remaining_time)
-            await update.message.reply_text(f"Soory ! hunter but you already claimed . Next reward in: `{formatted_time}`.")
-            return
-
+    # Update the user's balance, streak, and last claimed date
     await user_collection.update_one(
         {'id': user_id},
-        {'$inc': {'balance': 2000}, '$set': {'last_daily_reward': datetime.utcnow()}}
+        {'$inc': {'balance': total_reward}, 
+         '$set': {'last_daily_reward': datetime.utcnow(), 'streak': streak}}
     )
 
-    await update.message.reply_text("Congratulations! You claim $ `2000` Gold coins as a daily reward.")
+    # Respond with a detailed message
+    await message.reply_text(
+        "🎁 <b><u>❰ DAILY REWARDS ❱</u></b> 🎁\n\n"
+        f"💰 <b>Base Reward:</b> <code>₩{base_reward:,}</code>\n"
+        f"🔥 <b>Streak Bonus:</b> <code>₩{streak_bonus:,}</code>\n"
+        f"🏆 <b>Total Reward:</b> <code>₩{total_reward:,}</code>\n\n"
+        f"📅 <b>Current Streak:</b> {streak} days\n"
+            )
+    
+@bot.on_message(filters.command("weekly"))
+async def weekly_reward(_, message):
+    user_id = message.from_user.id
 
-async def roll(update, context):
-    user_id = update.effective_user.id
-    try:
-        amount = int(context.args[0])
-        choice = context.args[1].upper()  # Assuming the second argument is ODD or EVEN
-    except (IndexError, ValueError):
-        await update.message.reply_text("Invalid usage, please use /roll <amount> <ODD/EVEN>")
-        return
+    # Fetch user data
+    user_data = await user_collection.find_one(
+        {'id': user_id}, 
+        projection={'last_weekly_reward': 1, 'balance': 1, 'weekly_streak': 1}
+    )
 
-    if amount < 0:
-        await update.message.reply_text("Amount must be positive.")
-        return
-
-    user_data = await user_collection.find_one({'id': user_id})
     if not user_data:
-        await update.message.reply_text("User data not found.")
+        await message.reply_text("❌ **You are not registered yet. Use /start to begin your journey!**")
         return
 
-    balance_amount = user_data.get('balance', 0)
-    if amount < balance_amount * 0.07:
-        await update.message.reply_text("You can bet more than 7% of your balance.")
-        return
+    last_weekly_date = user_data.get('last_weekly_reward')
+    weekly_streak = user_data.get('weekly_streak', 0)
 
-    if balance_amount < amount:
-        await update.message.reply_text("Insufficient balance to place the bet.")
-        return
+    # Check if the reward was already claimed this week
+    current_week = datetime.utcnow().isocalendar()[1]  # Current week number
+    last_week = last_weekly_date.isocalendar()[1] if last_weekly_date else -1
 
-    # Send the dice emoji
-    dice_message = await context.bot.send_dice(update.effective_chat.id, "🎲")
-
-    # Extract the dice value
-    dice_value = dice_message.dice.value
-
-    # Check if the dice roll is odd or even
-    dice_result = "ODD" if dice_value % 2 != 0 else "EVEN"
-
-    xp_change = 0  # Initialize XP change
-
-    if choice == dice_result:
-        # User wins, update balance and add XP
-        xp_change = 4
-        await user_collection.update_one(
-            {'id': user_id},
-            {'$inc': {'balance': amount, 'user_xp': xp_change}}
+    if last_weekly_date and last_week == current_week:
+        await message.reply_text(
+            "🚫 **You've already claimed your weekly reward for this week!**\n"
+            "⏳ **Come back next week to continue your streak!**"
         )
-        await update.message.reply_text(f"Dice roll: {dice_value}\nYou won! Your balance increased by {amount * 2}.")
+        return
+
+    # Check if the streak was broken
+    if last_weekly_date and last_week < current_week - 1:
+        weekly_streak = 0  # Reset streak if skipped a week
+
+    # Increment streak and calculate reward
+    weekly_streak += 1
+    base_reward = 250000
+    streak_bonus = weekly_streak * 50000  # Bonus increases with streak
+    total_reward = base_reward + streak_bonus
+
+    # Update the user's balance, weekly streak, and last claimed date
+    await user_collection.update_one(
+        {'id': user_id},
+        {'$inc': {'balance': total_reward}, 
+         '$set': {'last_weekly_reward': datetime.utcnow(), 'weekly_streak': weekly_streak}}
+    )
+
+    # Respond with a detailed message
+    await message.reply_text(
+        "🎁 <b><u>❰ WEEKLY REWARDS ❱</u></b> 🎁\n\n"
+        f"💰 <b>Base Reward:</b> <code>₩{base_reward:,}</code>\n"
+        f"🔥 <b>Streak Bonus:</b> <code>₩{streak_bonus:,}</code>\n"
+        f"🏆 <b>Total Reward:</b> <code>₩{total_reward:,}</code>\n\n"
+        f"📅 <b>Current Streak:</b> {weekly_streak} weeks\n"
+        )
+
+# Assuming `user_collection` and `send_start_button` are already defined
+# Dictionary to track user cooldowns
+user_last_command_times = {}
+
+@bot.on_message(filters.command("tesure"))
+async def tesure(_, message: Message):
+    # Extract user information
+    user_id = message.from_user.id
+    first_name = message.from_user.first_name.strip() if message.from_user.first_name else ""
+    last_name = message.from_user.last_name.strip() if message.from_user.last_name else ""
+    current_time = datetime.utcnow()
+
+    # Cooldown for sending commands too quickly
+    if user_id in user_last_command_times:
+        time_since_last_command = (current_time - user_last_command_times[user_id]).total_seconds()
+        if time_since_last_command < 5:
+            await message.reply_text("⏳ **You're sending commands too quickly! Please wait a moment.**")
+            return
+
+    # Update the user's last command time
+    user_last_command_times[user_id] = current_time
+
+    # Check for required and disallowed tags
+    required_tag = "˹ 𝐃ʏɴᴧϻɪᴄ ˼"
+    disallowed_tag = "⸻꯭፝֟͠DCS 𐀔"
+
+    if required_tag not in first_name and required_tag not in last_name:
+        await message.reply_text(
+            f"🚫 **Please include `{required_tag}` in your first or last name to use this command.**"
+        )
+        return
+
+    if disallowed_tag in first_name or disallowed_tag in last_name:
+        await message.reply_text(
+            f"⚠️ **Please remove the tag `{disallowed_tag}` and only use `{required_tag}` to access this feature.**"
+        )
+        return
+
+    # Retrieve user data from the database
+    user_data = await user_collection.find_one({'id': user_id}, projection={'last_tesure_reward': 1, 'balance': 1})
+
+    if not user_data:
+        await send_start_button(message.chat.id)
+        return
+
+    last_claimed_time = user_data.get('last_tesure_reward')
+    if last_claimed_time:
+        last_claimed_time = last_claimed_time.replace(tzinfo=None)
+
+    # Check if cooldown period (30 minutes) has passed
+    cooldown_period = timedelta(minutes=30)
+    if last_claimed_time and (current_time - last_claimed_time) < cooldown_period:
+        remaining_time = cooldown_period - (current_time - last_claimed_time)
+        minutes, seconds = divmod(remaining_time.seconds, 60)
+        await message.reply_text(f"⏰ **Try again in `{minutes}:{seconds:02}` minutes!**")
+        return
+
+    # Calculate reward
+    reward = random.randint(5_000_000, 10_000_000)
+    if reward > 9_500_000:
+        luck_factor = "🌟 Ultra Lucky! 🌟"
+    elif reward > 7_500_000:
+        luck_factor = "🔥 Very Lucky!"
     else:
-        # User loses, deduct bet amount from balance and subtract XP
-        xp_change = -2
-        await user_collection.update_one(
-            {'id': user_id},
-            {'$inc': {'balance': -amount, 'user_xp': xp_change}}
-        )
-        await update.message.reply_text(f"Dice roll: {dice_value}\nYou lost! {amount} deducted from your balance.")
+        luck_factor = "💎 Lucky!"
 
-    # Notify user about XP change
-    await update.message.reply_text(f"XP change: {xp_change}")
+    # Update the user's balance and last claimed time
+    await user_collection.update_one(
+        {'id': user_id},
+        {'$inc': {'balance': reward}, '$set': {'last_tesure_reward': current_time}}
+    )
 
-application.add_handler(CommandHandler("roll", roll, block=False))
-
-async def xp(update, context):
-    user_id = update.effective_user.id
-    user_data = await user_collection.find_one({'id': user_id})
-
-    if not user_data:
-        await update.message.reply_text("User data not found.")
-        return
-
-    xp = user_data.get('user_xp', 0)
-    level = math.floor(math.sqrt(xp / 100)) + 1
-
-    if level > 100:
-        level = 100
-
-    ranks = {1: "E", 10: "D", 30: "C", 50: "B", 70: "A", 90: "S"}
-    rank = next((rank for xp_limit, rank in ranks.items() if level <= xp_limit), None)
-
-    message = f"Your current level is `{level}`\nand your rank is `{rank}`."
-
-    await update.message.reply_text(message)
-
-application.add_handler(CommandHandler("xp", xp, block=False))
-application.add_handler(CommandHandler("roll", roll, block=False))
-application.add_handler(CommandHandler("bal", balance, block=False))
+    # Send reward image and message
+    reward_image = "https://telegra.ph/file/1725558c206507d3e36ee.jpg"
+    await message.reply_photo(
+        photo=reward_image,
+        caption=(
+            "🎉 **❰ 𝗧 𝗥 𝗘 𝗔 𝗦 𝗨 𝗥 𝗘 🧧 ❱** 🎉\n\n"
+            f"🌟 **Treasure claimed successfully!**\n"
+            f"💰 **Reward:** <code>₩{reward:,}</code>\n"
+            f"{luck_factor}\n\n"
+            "📅 **Cooldown:** 30 minutes before you can claim again.\n"
+        ),
+        parse_mode="HTML"
+    )
+    
+application.add_handler(CommandHandler("tops", mtop, block=False))
 application.add_handler(CommandHandler("pay", pay, block=False))
 
-application.add_handler(CommandHandler("Tophunters", mtop, block=False))
-application.add_handler(CommandHandler("claim", daily_reward, block=False))
+    
+async def add_tokens(update: Update, context: CallbackContext) -> None:
+    user_id = update.effective_user.id
+
+    # Check if the user is a sudo user
+    if not await is_user_sudo(user_id):
+        await update.message.reply_text("🚫 **You don't have permission to add tokens.**")
+        return
+
+    # Check if the command includes the required arguments
+    if len(context.args) != 2:
+        await update.message.reply_text("❌ **Invalid usage.** Usage: `/addt <user_id> <amount>`")
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+        amount = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("🚫 **Invalid input. Please provide valid numbers.**")
+        return
+
+    # Find the target user
+    target_user = await user_collection.find_one({'id': target_user_id})
+    if not target_user:
+        await update.message.reply_text("🚫 **User not found.**")
+        return
+
+    # Update the balance by adding tokens
+    new_balance = target_user.get('balance', 0) + amount
+    await user_collection.update_one({'id': target_user_id}, {'$set': {'balance': new_balance}})
+    await update.message.reply_text(f"✅ **Added** `{amount}` **wealth to user** `{target_user_id}`. \n💰 **New balance:** `{new_balance}` wealth.")
+
+async def delete_tokens(update: Update, context: CallbackContext) -> None:
+    user_id = update.effective_user.id
+
+    # Check if the user is a sudo user
+    if not await is_user_sudo(user_id):
+        await update.message.reply_text("🚫 **You don't have permission to delete wealth.**")
+        return
+
+    # Check if the command includes the required arguments
+    if len(context.args) != 2:
+        await update.message.reply_text("❌ **Invalid usage.** Usage: `/delt <user_id> <amount>`")
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+        amount = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("🚫 **Invalid input. Please provide valid numbers.**")
+        return
+
+    # Find the target user
+    target_user = await user_collection.find_one({'id': target_user_id})
+    if not target_user:
+        await update.message.reply_text("🚫 **User not found.**")
+        return
+
+    # Check if there are enough tokens to delete
+    current_balance = target_user.get('balance', 0)
+    if current_balance < amount:
+        await update.message.reply_text("❌ **Insufficient wealth to delete.**")
+        return
+
+    # Update the balance by deleting tokens
+    new_balance = current_balance - amount
+    await user_collection.update_one({'id': target_user_id}, {'$set': {'balance': new_balance}})
+    await update.message.reply_text(f"✅ **Deleted** `{amount}` **tokens from user** `{target_user_id}`. \n💰 **New balance:** `{new_balance}` tokens.")
+
+async def reset_tokens(update: Update, context: CallbackContext) -> None:
+    owner_id = 6402009857  # Replace with the actual owner's user ID
+    # Check if the user invoking the command is the owner
+    if update.effective_user.id != owner_id:
+        await update.message.reply_text("🚫 **You don't have permission to perform this action.**")
+        return
+
+    # Reset tokens for all users
+    await user_collection.update_many({}, {'$set': {'balance': 10000}})
+    
+    await update.message.reply_text("🔄 **All user wealth have been reset to** `10,000` **wealth.**")
+
+# Add handlers for the commands
+application.add_handler(CommandHandler("addt", add_tokens, block=False))
+application.add_handler(CommandHandler("delt", delete_tokens, block=False))
+application.add_handler(CommandHandler("reset", reset_tokens, block=False))
